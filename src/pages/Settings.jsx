@@ -51,18 +51,41 @@ export default function Settings() {
   async function enableNotifications() {
     setNotifStatus('requesting')
     try {
-      // 1. Request permission
+      // 1. Check support
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+        setNotifStatus('error: Push notifications not supported in this browser')
+        return
+      }
+
+      // 2. Request permission
       const permission = await Notification.requestPermission()
       setNotifPermission(permission)
       if (permission !== 'granted') { setNotifStatus(''); return }
 
-      // 2. Get service worker + subscribe to push
+      // 3. Check VAPID key
       const vapidKey = import.meta.env.VITE_VAPID_PUBLIC_KEY
       if (!vapidKey) {
-        setNotifStatus('error: VITE_VAPID_PUBLIC_KEY not set — see README')
+        setNotifStatus('error: VITE_VAPID_PUBLIC_KEY not set in GitHub Secrets (see README)')
         return
       }
-      const reg = await navigator.serviceWorker.ready
+
+      // 4. Wait for service worker — with a 10s timeout so it doesn't hang forever
+      let reg
+      try {
+        reg = await Promise.race([
+          navigator.serviceWorker.ready,
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(
+              'Service worker not ready. Make sure you have deployed the latest build (git push), then hard-refresh the page (Ctrl+Shift+R) and try again.'
+            )), 10000)
+          )
+        ])
+      } catch (swErr) {
+        setNotifStatus(`error: ${swErr.message}`)
+        return
+      }
+
+      // 5. Get or create push subscription
       let pushSub = await reg.pushManager.getSubscription()
       if (!pushSub) {
         pushSub = await reg.pushManager.subscribe({
@@ -71,7 +94,7 @@ export default function Settings() {
         })
       }
 
-      // 3. Save subscription + time + UTC offset to Supabase
+      // 6. Save to Supabase
       const { data: { user } } = await supabase.auth.getUser()
       const { error } = await supabase.from('push_subscriptions').upsert({
         user_id: user.id,
