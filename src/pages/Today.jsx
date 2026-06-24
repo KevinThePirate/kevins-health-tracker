@@ -83,9 +83,15 @@ export default function Today() {
         .eq('is_deleted', false)
         .order('sort_order')
 
-      const habitList = habitData?.length
-        ? habitData
-        : DEFAULT_HABITS.map((name, i) => ({ id: `default-${i}`, name, sort_order: i }))
+      let habitList = habitData || []
+      if (!habitList.length) {
+        // Seed defaults into DB so they get real UUIDs
+        const toInsert = DEFAULT_HABITS.map((name, i) => ({
+          user_id: user.id, name, sort_order: i, is_deleted: false
+        }))
+        const { data: inserted } = await supabase.from('habits').insert(toInsert).select()
+        habitList = inserted || []
+      }
       setHabits(habitList)
 
       // Load log for the selected date
@@ -94,7 +100,7 @@ export default function Today() {
         .select('*')
         .eq('user_id', user.id)
         .eq('log_date', logDate)
-        .single()
+        .maybeSingle()
 
       if (log) {
         setLogId(log.id)
@@ -116,7 +122,7 @@ export default function Today() {
           .select('ulcer_clear, ulcer_count, ulcer_pain')
           .eq('user_id', user.id)
           .eq('log_date', prevStr)
-          .single()
+          .maybeSingle()
         if (prevLog && !prevLog.ulcer_clear) {
           setUlcerClear(false)
           setUlcerCount(prevLog.ulcer_count ?? 1)
@@ -140,7 +146,12 @@ export default function Today() {
     setError('')
     setSaving(true)
 
-    const { data: { user } } = await supabase.auth.getUser()
+    const { data: { user }, error: authErr } = await supabase.auth.getUser()
+    if (authErr || !user) {
+      setError('Not logged in. Please refresh and sign in again.')
+      setSaving(false)
+      return
+    }
     const parsed = parseFood(foodRaw)
     const cal = totalCalories(parsed)
 
@@ -164,7 +175,7 @@ export default function Today() {
       const res = await supabase.from('daily_logs').update(payload).eq('id', logId)
       err = res.error
     } else {
-      const res = await supabase.from('daily_logs').insert(payload).select().single()
+      const res = await supabase.from('daily_logs').insert(payload).select().maybeSingle()
       err = res.error
       if (res.data) setLogId(res.data.id)
     }
