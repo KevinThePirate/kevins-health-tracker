@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useSearchParams } from 'react-router-dom'
 import { supabase } from '../supabase'
@@ -28,9 +28,7 @@ const MOODS = [
   { emoji: '😞', label: 'Depressed', value: 1 },
 ]
 
-const staggerContainer = {
-  animate: { transition: { staggerChildren: 0.06 } }
-}
+const staggerContainer = { animate: { transition: { staggerChildren: 0.06 } } }
 const staggerItem = {
   initial: { opacity: 0, y: 16 },
   animate: { opacity: 1, y: 0, transition: { type: 'spring', stiffness: 300, damping: 24 } }
@@ -48,11 +46,16 @@ export default function Today() {
   const [foodRaw, setFoodRaw] = useState('')
   const [foodParsed, setFoodParsed] = useState([])
   const [notes, setNotes] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [saved, setSaved] = useState(false)
   const [logId, setLogId] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
+  const [saveStatus, setSaveStatus] = useState('idle') // 'idle' | 'saving' | 'saved' | 'error'
+  const [saveError, setSaveError] = useState('')
+
+  // isDirty ref — set true when user changes something, false after load/save
+  const isDirty = useRef(false)
+  // Store logId in a ref too so the auto-save effect always has the latest value
+  const logIdRef = useRef(null)
+  const userIdRef = useRef(null)
 
   const pct = habits.length ? Math.round((checked.length / habits.length) * 100) : 0
 
@@ -63,29 +66,28 @@ export default function Today() {
     if (next <= todayStr()) setLogDate(next)
   }
 
-  useEffect(() => {
-    loadData()
-  }, [logDate])
+  // ── Load data when date changes ──────────────────────────────
+  useEffect(() => { loadData() }, [logDate])
 
   async function loadData() {
+    isDirty.current = false
     setLoading(true)
-    // Reset form state when switching dates
     setChecked([]); setMood(null); setUlcerClear(true); setUlcerCount(1)
-    setUlcerPain(null); setFoodRaw(''); setFoodParsed([]); setNotes(''); setLogId(null)
+    setUlcerPain(null); setFoodRaw(''); setFoodParsed([]); setNotes('')
+    setLogId(null); logIdRef.current = null
+    setSaveStatus('idle'); setSaveError('')
+
     try {
       const { data: { user } } = await supabase.auth.getUser()
+      userIdRef.current = user.id
 
       // Load habits
       const { data: habitData } = await supabase
-        .from('habits')
-        .select('*')
-        .eq('user_id', user.id)
-        .eq('is_deleted', false)
-        .order('sort_order')
+        .from('habits').select('*').eq('user_id', user.id)
+        .eq('is_deleted', false).order('sort_order')
 
       let habitList = habitData || []
       if (!habitList.length) {
-        // Seed defaults into DB so they get real UUIDs
         const toInsert = DEFAULT_HABITS.map((name, i) => ({
           user_id: user.id, name, sort_order: i, is_deleted: false
         }))
@@ -96,13 +98,11 @@ export default function Today() {
 
       // Load log for the selected date
       const { data: log } = await supabase
-        .from('daily_logs')
-        .select('*')
-        .eq('user_id', user.id)
-        .eq('log_date', logDate)
-        .maybeSingle()
+        .from('daily_logs').select('*').eq('user_id', user.id)
+        .eq('log_date', logDate).maybeSingle()
 
       if (log) {
+        logIdRef.current = log.id
         setLogId(log.id)
         setChecked(log.habit_ids || [])
         setMood(log.mood)
@@ -113,16 +113,12 @@ export default function Today() {
         setFoodParsed(log.food_parsed || [])
         setNotes(log.notes || '')
       } else {
-        // Pre-populate ulcer from the previous day
+        // Pre-populate ulcer from previous day
         const prev = new Date(logDate + 'T12:00:00')
         prev.setDate(prev.getDate() - 1)
-        const prevStr = prev.toISOString().split('T')[0]
         const { data: prevLog } = await supabase
-          .from('daily_logs')
-          .select('ulcer_clear, ulcer_count, ulcer_pain')
-          .eq('user_id', user.id)
-          .eq('log_date', prevStr)
-          .maybeSingle()
+          .from('daily_logs').select('ulcer_clear,ulcer_count,ulcer_pain')
+          .eq('user_id', user.id).eq('log_date', prev.toISOString().split('T')[0]).maybeSingle()
         if (prevLog && !prevLog.ulcer_clear) {
           setUlcerClear(false)
           setUlcerCount(prevLog.ulcer_count ?? 1)
@@ -130,62 +126,72 @@ export default function Today() {
         }
       }
     } catch (e) {
-      console.error(e)
+      console.error('loadData error:', e)
     }
     setLoading(false)
   }
 
-  function toggleHabit(id) {
-    setChecked(prev =>
-      prev.includes(id) ? prev.filter(h => h !== id) : [...prev, id]
-    )
+  // ── Auto-save: debounce 1.5s after any field change ──────────
+  useEffect(() => {
+    if (!isDirty.current) return
+    if (!userIdRef.current) return
+
+    setSaveStatus('saving')
+    const timer = setTimeout(async () => {
+      const parsed = parseFood(foodRaw)
+      const cal = totalCalories(parsed)
+
+      const payload = {
+        user_id: userIdRef.current,
+        log_date: logDate,
+        mood,
+        habit_ids: checked,
+        food_raw: foodRaw,
+        food_parsed: parsed,
+        total_calories: cal || null,
+        ulcer_clear: ulcerClear,
+        ulcer_count: ulcerClear ? null : ulcerCount,
+        ulcer_pain: ulcerClear ? null : ulcerPain,
+        notes,
+        updated_at: new Date().toISOString(),
+      }
+
+      let err, newId
+      if (logIdRef.current) {
+        const res = await supabase.from('daily_logs').update(payload).eq('id', logIdRef.current)
+        err = res.error
+      } else {
+        const res = await supabase.from('daily_logs').insert(payload).select().maybeSingle()
+        err = res.error
+        if (res.data) { newId = res.data.id; logIdRef.current = newId; setLogId(newId) }
+      }
+
+      if (err) {
+        console.error('save error:', err)
+        setSaveStatus('error')
+        setSaveError(err.message)
+      } else {
+        setFoodParsed(parsed)
+        isDirty.current = false
+        setSaveStatus('saved')
+        setTimeout(() => setSaveStatus('idle'), 2000)
+      }
+    }, 1500)
+
+    return () => clearTimeout(timer)
+  }, [checked, mood, ulcerClear, ulcerCount, ulcerPain, foodRaw, notes])
+
+  // Helpers that mark the form dirty
+  function mark(setter) {
+    return (...args) => {
+      isDirty.current = true
+      setter(...args)
+    }
   }
 
-  async function handleSave() {
-    if (!mood) { setError('Please select a mood before saving.'); return }
-    setError('')
-    setSaving(true)
-
-    const { data: { user }, error: authErr } = await supabase.auth.getUser()
-    if (authErr || !user) {
-      setError('Not logged in. Please refresh and sign in again.')
-      setSaving(false)
-      return
-    }
-    const parsed = parseFood(foodRaw)
-    const cal = totalCalories(parsed)
-
-    const payload = {
-      user_id: user.id,
-      log_date: logDate,
-      mood,
-      habit_ids: checked,
-      food_raw: foodRaw,
-      food_parsed: parsed,
-      total_calories: cal || null,
-      ulcer_clear: ulcerClear,
-      ulcer_count: ulcerClear ? null : ulcerCount,
-      ulcer_pain: ulcerClear ? null : ulcerPain,
-      notes,
-      updated_at: new Date().toISOString(),
-    }
-
-    let err
-    if (logId) {
-      const res = await supabase.from('daily_logs').update(payload).eq('id', logId)
-      err = res.error
-    } else {
-      const res = await supabase.from('daily_logs').insert(payload).select().maybeSingle()
-      err = res.error
-      if (res.data) setLogId(res.data.id)
-    }
-
-    if (err) { setError(err.message); setSaving(false); return }
-
-    setFoodParsed(parsed)
-    setSaving(false)
-    setSaved(true)
-    setTimeout(() => setSaved(false), 3000)
+  function toggleHabit(id) {
+    isDirty.current = true
+    setChecked(prev => prev.includes(id) ? prev.filter(h => h !== id) : [...prev, id])
   }
 
   if (loading) {
@@ -198,14 +204,48 @@ export default function Today() {
 
   return (
     <div className="max-w-xl mx-auto px-4 py-6 space-y-6">
-      {/* Header with date navigation */}
+
+      {/* Header with date nav + save status */}
       <motion.div variants={staggerItem} initial="initial" animate="animate">
-        <h1 className="text-2xl font-bold text-gray-900 mb-3">
-          {logDate === todayStr() ? 'Today' : logDate === yesterday() ? 'Yesterday' : 'Log Entry'}
-        </h1>
+        <div className="flex items-center justify-between mb-3">
+          <h1 className="text-2xl font-bold text-gray-900">
+            {logDate === todayStr() ? 'Today' : logDate === yesterday() ? 'Yesterday' : 'Log Entry'}
+          </h1>
+          {/* Save status indicator */}
+          <AnimatePresence mode="wait">
+            {saveStatus === 'saving' && (
+              <motion.span key="saving"
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                className="text-xs text-gray-400 flex items-center gap-1"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse inline-block" />
+                Saving…
+              </motion.span>
+            )}
+            {saveStatus === 'saved' && (
+              <motion.span key="saved"
+                initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+                className="text-xs text-teal-600 flex items-center gap-1 font-medium"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-teal-500 inline-block" />
+                Saved
+              </motion.span>
+            )}
+            {saveStatus === 'error' && (
+              <motion.span key="error"
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                className="text-xs text-red-500 flex items-center gap-1"
+                title={saveError}
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-red-500 inline-block" />
+                Error saving
+              </motion.span>
+            )}
+          </AnimatePresence>
+        </div>
+
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => changeDate(-1)}
+          <button onClick={() => changeDate(-1)}
             className="w-9 h-9 rounded-xl bg-white shadow-sm border border-gray-100 flex items-center justify-center text-gray-500 hover:bg-gray-50 font-bold"
           >‹</button>
           <div className="flex-1 text-center bg-white rounded-xl shadow-sm border border-gray-100 py-2 px-3">
@@ -213,19 +253,14 @@ export default function Today() {
               {new Date(logDate + 'T12:00:00').toLocaleDateString('en-IE', { weekday: 'long', day: 'numeric', month: 'long' })}
             </p>
           </div>
-          <button
-            onClick={() => changeDate(1)}
-            disabled={logDate >= todayStr()}
+          <button onClick={() => changeDate(1)} disabled={logDate >= todayStr()}
             className="w-9 h-9 rounded-xl bg-white shadow-sm border border-gray-100 flex items-center justify-center text-gray-500 hover:bg-gray-50 font-bold disabled:opacity-30"
           >›</button>
         </div>
       </motion.div>
 
       {/* Habits */}
-      <motion.section
-        variants={staggerContainer}
-        initial="initial"
-        animate="animate"
+      <motion.section variants={staggerContainer} initial="initial" animate="animate"
         className="bg-white rounded-2xl shadow-sm p-5"
       >
         <motion.div variants={staggerItem} className="mb-4">
@@ -233,7 +268,6 @@ export default function Today() {
             <h2 className="font-bold text-gray-800">Habits</h2>
             <span className="text-sm font-semibold text-teal-600">{checked.length} / {habits.length} · {pct}%</span>
           </div>
-          {/* Progress bar */}
           <div className="relative h-3 bg-gray-100 rounded-full overflow-hidden">
             <motion.div
               className={`h-full rounded-full ${pct >= 70 ? 'bg-teal-500' : 'bg-amber-400'}`}
@@ -241,7 +275,6 @@ export default function Today() {
               animate={{ width: `${pct}%` }}
               transition={{ duration: 0.5, ease: 'easeOut' }}
             />
-            {/* 70% marker */}
             <div className="absolute top-0 bottom-0 w-0.5 bg-gray-400 opacity-50" style={{ left: '70%' }} />
           </div>
           <div className="text-xs text-gray-400 mt-1 text-right">Goal: 70%</div>
@@ -250,9 +283,7 @@ export default function Today() {
         {habits.map(habit => {
           const isChecked = checked.includes(habit.id)
           return (
-            <motion.button
-              key={habit.id}
-              variants={staggerItem}
+            <motion.button key={habit.id} variants={staggerItem}
               onClick={() => toggleHabit(habit.id)}
               whileTap={{ scale: 0.97 }}
               className="w-full flex items-center gap-3 py-2.5 px-1 border-b border-gray-50 last:border-0 min-touch text-left"
@@ -265,10 +296,9 @@ export default function Today() {
                 }`}
               >
                 {isChecked && (
-                  <motion.svg
-                    initial={{ scale: 0 }} animate={{ scale: 1 }}
-                    className="w-3.5 h-3.5 text-white"
-                    fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}
+                  <motion.svg initial={{ scale: 0 }} animate={{ scale: 1 }}
+                    className="w-3.5 h-3.5 text-white" fill="none" viewBox="0 0 24 24"
+                    stroke="currentColor" strokeWidth={3}
                   >
                     <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                   </motion.svg>
@@ -283,16 +313,14 @@ export default function Today() {
       </motion.section>
 
       {/* Mood */}
-      <motion.section
-        variants={staggerItem} initial="initial" animate="animate"
+      <motion.section variants={staggerItem} initial="initial" animate="animate"
         className="bg-white rounded-2xl shadow-sm p-5"
       >
         <h2 className="font-bold text-gray-800 mb-4">Mood</h2>
         <div className="flex justify-between">
           {MOODS.map(m => (
-            <motion.button
-              key={m.value}
-              onClick={() => setMood(m.value)}
+            <motion.button key={m.value}
+              onClick={() => mark(setMood)(m.value)}
               animate={{ scale: mood === m.value ? 1.25 : 1 }}
               whileTap={{ scale: 1.1 }}
               transition={{ type: 'spring', stiffness: 400, damping: 15 }}
@@ -308,49 +336,32 @@ export default function Today() {
       </motion.section>
 
       {/* Mouth Ulcers */}
-      <motion.section
-        variants={staggerItem} initial="initial" animate="animate"
+      <motion.section variants={staggerItem} initial="initial" animate="animate"
         className="bg-white rounded-2xl shadow-sm p-5"
       >
         <h2 className="font-bold text-gray-800 mb-3">Mouth Ulcers</h2>
         <div className="flex gap-2">
-          <motion.button
-            onClick={() => setUlcerClear(true)}
-            whileTap={{ scale: 0.96 }}
-            className={`flex-1 py-2.5 rounded-xl text-sm font-semibold transition-colors ${
-              ulcerClear ? 'bg-teal-500 text-white' : 'bg-gray-100 text-gray-500'
-            }`}
-          >
-            ✅ All clear
-          </motion.button>
-          <motion.button
-            onClick={() => setUlcerClear(false)}
-            whileTap={{ scale: 0.96 }}
-            className={`flex-1 py-2.5 rounded-xl text-sm font-semibold transition-colors ${
-              !ulcerClear ? 'bg-coral-500 text-white' : 'bg-gray-100 text-gray-500'
-            }`}
+          <motion.button onClick={() => mark(setUlcerClear)(true)} whileTap={{ scale: 0.96 }}
+            className={`flex-1 py-2.5 rounded-xl text-sm font-semibold transition-colors ${ulcerClear ? 'bg-teal-500 text-white' : 'bg-gray-100 text-gray-500'}`}
+          >✅ All clear</motion.button>
+          <motion.button onClick={() => mark(setUlcerClear)(false)} whileTap={{ scale: 0.96 }}
+            className={`flex-1 py-2.5 rounded-xl text-sm font-semibold transition-colors ${!ulcerClear ? 'text-white' : 'bg-gray-100 text-gray-500'}`}
             style={{ backgroundColor: !ulcerClear ? '#f83f35' : '' }}
-          >
-            😣 Ulcers present
-          </motion.button>
+          >😣 Ulcers present</motion.button>
         </div>
 
         <AnimatePresence>
           {!ulcerClear && (
             <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: 'auto', opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.3, ease: 'easeInOut' }}
+              initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.3, ease: 'easeInOut' }}
               className="overflow-hidden"
             >
               <div className="pt-4 space-y-3">
                 <div>
                   <label className="text-sm font-medium text-gray-600 mb-1 block">Number of ulcers</label>
-                  <input
-                    type="number" min={1} max={20}
-                    value={ulcerCount}
-                    onChange={e => setUlcerCount(parseInt(e.target.value) || 1)}
+                  <input type="number" min={1} max={20} value={ulcerCount}
+                    onChange={e => mark(setUlcerCount)(parseInt(e.target.value) || 1)}
                     className="w-24 px-3 py-2 rounded-xl border border-gray-200 text-sm text-center focus:outline-none focus:ring-2 focus:ring-teal-400"
                   />
                 </div>
@@ -358,17 +369,10 @@ export default function Today() {
                   <label className="text-sm font-medium text-gray-600 mb-2 block">Pain level</label>
                   <div className="flex gap-2">
                     {[1,2,3,4,5].map(n => (
-                      <motion.button
-                        key={n}
-                        onClick={() => setUlcerPain(n)}
-                        whileTap={{ scale: 0.92 }}
-                        className={`w-10 h-10 rounded-xl text-sm font-bold transition-colors ${
-                          ulcerPain === n ? 'bg-coral-500 text-white' : 'bg-gray-100 text-gray-600'
-                        }`}
+                      <motion.button key={n} onClick={() => mark(setUlcerPain)(n)} whileTap={{ scale: 0.92 }}
+                        className={`w-10 h-10 rounded-xl text-sm font-bold transition-colors ${ulcerPain === n ? 'text-white' : 'bg-gray-100 text-gray-600'}`}
                         style={{ backgroundColor: ulcerPain === n ? '#f83f35' : '' }}
-                      >
-                        {n}
-                      </motion.button>
+                      >{n}</motion.button>
                     ))}
                   </div>
                 </div>
@@ -379,24 +383,18 @@ export default function Today() {
       </motion.section>
 
       {/* Food log */}
-      <motion.section
-        variants={staggerItem} initial="initial" animate="animate"
+      <motion.section variants={staggerItem} initial="initial" animate="animate"
         className="bg-white rounded-2xl shadow-sm p-5"
       >
         <h2 className="font-bold text-gray-800 mb-2">Food Log</h2>
-        <textarea
-          value={foodRaw}
-          onChange={e => setFoodRaw(e.target.value)}
+        <textarea value={foodRaw}
+          onChange={e => mark(setFoodRaw)(e.target.value)}
           rows={3}
           className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 resize-none"
           placeholder="Porridge, large coffee with milk, chicken fillet roll, two Kit Kats…"
         />
-
         {foodParsed.length > 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
-            className="mt-3 space-y-1.5"
-          >
+          <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="mt-3 space-y-1.5">
             {foodParsed.map((item, i) => (
               <div key={i} className="flex justify-between items-center text-sm py-1 border-b border-gray-50 last:border-0">
                 <span className="text-gray-700">
@@ -417,58 +415,24 @@ export default function Today() {
       </motion.section>
 
       {/* Notes */}
-      <motion.section
-        variants={staggerItem} initial="initial" animate="animate"
+      <motion.section variants={staggerItem} initial="initial" animate="animate"
         className="bg-white rounded-2xl shadow-sm p-5"
       >
         <h2 className="font-bold text-gray-800 mb-2">Notes</h2>
-        <textarea
-          value={notes}
-          onChange={e => setNotes(e.target.value)}
+        <textarea value={notes}
+          onChange={e => mark(setNotes)(e.target.value)}
           rows={3}
           className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 resize-none"
           placeholder="Anything else worth noting…"
         />
       </motion.section>
 
-      {/* Error */}
-      {error && (
-        <motion.p
-          initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-          className="text-red-600 text-sm bg-red-50 rounded-xl px-4 py-3"
-        >
-          {error}
-        </motion.p>
+      {saveStatus === 'error' && (
+        <p className="text-red-600 text-sm bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-center">
+          ⚠️ Could not save: {saveError}
+        </p>
       )}
 
-      {/* Save button */}
-      <motion.button
-        variants={staggerItem} initial="initial" animate="animate"
-        onClick={handleSave}
-        disabled={saving || saved}
-        whileTap={{ scale: 0.97 }}
-        animate={saving ? { scale: [1, 0.98, 1] } : {}}
-        transition={{ repeat: saving ? Infinity : 0, duration: 0.8 }}
-        className={`w-full py-4 rounded-2xl font-bold text-lg transition-colors shadow-sm ${
-          saved ? 'bg-teal-500 text-white' : 'bg-teal-500 hover:bg-teal-600 text-white'
-        } disabled:opacity-70`}
-      >
-        <AnimatePresence mode="wait">
-          {saved ? (
-            <motion.span key="check" initial={{ scale: 0 }} animate={{ scale: 1 }} exit={{ scale: 0 }}>
-              ✓ Saved!
-            </motion.span>
-          ) : saving ? (
-            <motion.span key="saving" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-              Saving…
-            </motion.span>
-          ) : (
-            <motion.span key="save" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-              Save day
-            </motion.span>
-          )}
-        </AnimatePresence>
-      </motion.button>
     </div>
   )
 }
