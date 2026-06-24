@@ -1,11 +1,11 @@
-// Required placeholder for vite-plugin-pwa injectManifest strategy — do not remove
-// eslint-disable-next-line no-unused-vars
-const _precacheManifest = self.__WB_MANIFEST
+// Required by vite-plugin-pwa injectManifest strategy.
+// Global assignment survives Rollup tree-shaking — do not change this line.
+self.__WB_MANIFEST_LOADED = self.__WB_MANIFEST
 
 self.addEventListener('install', () => self.skipWaiting())
 self.addEventListener('activate', event => event.waitUntil(clients.claim()))
 
-// Receive a push from the GitHub Actions sender script
+// Handle incoming push from GitHub Actions
 self.addEventListener('push', event => {
   const data = event.data?.json() ?? {}
   event.waitUntil(
