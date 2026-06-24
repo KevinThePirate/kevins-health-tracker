@@ -9,6 +9,13 @@ const DEFAULT_HABITS = [
   'Comic work', 'Daily spending budget', '3 meals'
 ]
 
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4)
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/')
+  const raw = atob(base64)
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)))
+}
+
 export default function Settings() {
   const [habits, setHabits] = useState([])
   const [newHabit, setNewHabit] = useState('')
@@ -19,8 +26,89 @@ export default function Settings() {
   const [msg, setMsg] = useState('')
   const [notifTime, setNotifTime] = useState('09:00')
   const [notifEnabled, setNotifEnabled] = useState(false)
+  const [notifPermission, setNotifPermission] = useState(
+    typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'
+  )
+  const [notifStatus, setNotifStatus] = useState('')
 
-  useEffect(() => { loadHabits() }, [])
+  useEffect(() => {
+    loadHabits()
+    loadNotifPrefs()
+  }, [])
+
+  async function loadNotifPrefs() {
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+      const { data } = await supabase
+        .from('push_subscriptions').select('notification_time').eq('user_id', user.id).maybeSingle()
+      if (data) {
+        setNotifTime(data.notification_time)
+        setNotifEnabled(true)
+      }
+    } catch (e) { /* no subscription yet */ }
+  }
+
+  async function enableNotifications() {
+    setNotifStatus('requesting')
+    try {
+      // 1. Request permission
+      const permission = await Notification.requestPermission()
+      setNotifPermission(permission)
+      if (permission !== 'granted') { setNotifStatus(''); return }
+
+      // 2. Get service worker + subscribe to push
+      const vapidKey = import.meta.env.VITE_VAPID_PUBLIC_KEY
+      if (!vapidKey) {
+        setNotifStatus('error: VITE_VAPID_PUBLIC_KEY not set — see README')
+        return
+      }
+      const reg = await navigator.serviceWorker.ready
+      let pushSub = await reg.pushManager.getSubscription()
+      if (!pushSub) {
+        pushSub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(vapidKey)
+        })
+      }
+
+      // 3. Save subscription + time + UTC offset to Supabase
+      const { data: { user } } = await supabase.auth.getUser()
+      const { error } = await supabase.from('push_subscriptions').upsert({
+        user_id: user.id,
+        subscription: pushSub.toJSON(),
+        notification_time: notifTime,
+        utc_offset_mins: -new Date().getTimezoneOffset()
+      }, { onConflict: 'user_id' })
+
+      if (error) { setNotifStatus(`error: ${error.message}`); return }
+      setNotifEnabled(true)
+      setNotifStatus('saved')
+      setTimeout(() => setNotifStatus(''), 2500)
+    } catch (e) {
+      setNotifStatus(`error: ${e.message}`)
+    }
+  }
+
+  async function disableNotifications() {
+    try {
+      const reg = await navigator.serviceWorker.ready
+      const pushSub = await reg.pushManager.getSubscription()
+      if (pushSub) await pushSub.unsubscribe()
+      const { data: { user } } = await supabase.auth.getUser()
+      await supabase.from('push_subscriptions').delete().eq('user_id', user.id)
+    } catch (e) { console.error(e) }
+    setNotifEnabled(false)
+    setNotifStatus('')
+  }
+
+  async function updateNotifTime(time) {
+    setNotifTime(time)
+    if (!notifEnabled) return
+    const { data: { user } } = await supabase.auth.getUser()
+    await supabase.from('push_subscriptions')
+      .update({ notification_time: time, utc_offset_mins: -new Date().getTimezoneOffset() })
+      .eq('user_id', user.id)
+  }
 
   async function loadHabits() {
     const { data: { user } } = await supabase.auth.getUser()
@@ -203,11 +291,27 @@ export default function Settings() {
       {/* Notifications */}
       <section className="bg-white rounded-2xl shadow-sm p-5">
         <h2 className="font-bold text-gray-800 mb-3">Notifications</h2>
+
+        {notifPermission === 'unsupported' && (
+          <p className="text-xs text-amber-600 bg-amber-50 rounded-xl px-3 py-2 mb-3">
+            Your browser doesn't support push notifications.
+          </p>
+        )}
+        {notifPermission === 'denied' && (
+          <p className="text-xs text-red-500 bg-red-50 rounded-xl px-3 py-2 mb-3">
+            Notifications are blocked in your browser. Open site settings for this page and change Notifications to "Allow", then try again.
+          </p>
+        )}
+
         <div className="flex items-center justify-between mb-3">
-          <span className="text-sm text-gray-700">Daily reminder</span>
+          <div>
+            <p className="text-sm text-gray-700 font-medium">Daily reminder</p>
+            <p className="text-xs text-gray-400">Fires even when the app is closed</p>
+          </div>
           <button
-            onClick={() => setNotifEnabled(!notifEnabled)}
-            className={`relative w-12 h-6 rounded-full transition-colors ${notifEnabled ? 'bg-teal-500' : 'bg-gray-200'}`}
+            disabled={notifPermission === 'unsupported' || notifPermission === 'denied' || notifStatus === 'requesting'}
+            onClick={() => notifEnabled ? disableNotifications() : enableNotifications()}
+            className={`relative w-12 h-6 rounded-full transition-colors disabled:opacity-40 ${notifEnabled ? 'bg-teal-500' : 'bg-gray-200'}`}
           >
             <motion.div
               animate={{ x: notifEnabled ? 24 : 2 }}
@@ -216,19 +320,36 @@ export default function Settings() {
             />
           </button>
         </div>
+
         {notifEnabled && (
-          <div className="flex items-center gap-3">
-            <label className="text-sm text-gray-600">Time</label>
+          <div className="flex items-center gap-3 mb-3">
+            <label className="text-sm text-gray-600">Remind me at</label>
             <input
               type="time"
               value={notifTime}
-              onChange={e => setNotifTime(e.target.value)}
+              onChange={e => updateNotifTime(e.target.value)}
               className="px-3 py-2 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400"
             />
           </div>
         )}
+
+        {notifStatus === 'requesting' && (
+          <p className="text-xs text-gray-400 mt-2">Setting up notifications…</p>
+        )}
+        {notifStatus === 'saved' && (
+          <p className="text-xs text-teal-600 bg-teal-50 rounded-xl px-3 py-2 mt-2">
+            ✓ You'll be reminded at {notifTime} if yesterday isn't logged yet.
+          </p>
+        )}
+        {notifStatus.startsWith('error') && (
+          <p className="text-xs text-red-500 bg-red-50 rounded-xl px-3 py-2 mt-2">{notifStatus}</p>
+        )}
+        {notifEnabled && notifStatus === '' && (
+          <p className="text-xs text-teal-600 mt-2">✓ Reminders on — daily at {notifTime}</p>
+        )}
+
         <p className="text-xs text-gray-400 mt-2">
-          Notifications require browser permission and work best when the app is installed as a PWA.
+          Requires VAPID keys to be configured — see README. Works on desktop Chrome/Firefox/Edge and Android Chrome. iOS requires the app to be installed as a PWA.
         </p>
       </section>
 
