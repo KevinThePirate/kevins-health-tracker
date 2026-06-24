@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
 import { supabase } from '../supabase'
 
@@ -14,6 +14,37 @@ function urlBase64ToUint8Array(base64String) {
   const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/')
   const raw = atob(base64)
   return Uint8Array.from([...raw].map(c => c.charCodeAt(0)))
+}
+
+// Register (or retrieve) the dedicated push-only service worker.
+// It lives at /push/ scope so it doesn't conflict with the main PWA SW.
+async function getPushReg() {
+  const swUrl = '/kevins-health-tracker/push-sw.js'
+  const scope  = '/kevins-health-tracker/push/'
+
+  // Reuse if already active
+  const regs = await navigator.serviceWorker.getRegistrations()
+  const existing = regs.find(r => r.scope.endsWith('/push/'))
+  if (existing?.active) return existing
+
+  // Register and wait for activation
+  const reg = await navigator.serviceWorker.register(swUrl, { scope })
+  if (reg.active) return reg
+
+  return new Promise((resolve, reject) => {
+    const sw = reg.installing || reg.waiting
+    if (!sw) { reject(new Error('Push service worker failed to start')); return }
+    sw.addEventListener('statechange', function handler(e) {
+      if (e.target.state === 'activated') {
+        sw.removeEventListener('statechange', handler)
+        resolve(reg)
+      }
+      if (e.target.state === 'redundant') {
+        sw.removeEventListener('statechange', handler)
+        reject(new Error('Push service worker became redundant'))
+      }
+    })
+  })
 }
 
 export default function Settings() {
@@ -51,7 +82,7 @@ export default function Settings() {
   async function enableNotifications() {
     setNotifStatus('requesting')
     try {
-      // 1. Check support
+      // 1. Check browser support
       if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
         setNotifStatus('error: Push notifications not supported in this browser')
         return
@@ -62,30 +93,23 @@ export default function Settings() {
       setNotifPermission(permission)
       if (permission !== 'granted') { setNotifStatus(''); return }
 
-      // 3. Check VAPID key
+      // 3. Check VAPID key is set
       const vapidKey = import.meta.env.VITE_VAPID_PUBLIC_KEY
       if (!vapidKey) {
-        setNotifStatus('error: VITE_VAPID_PUBLIC_KEY not set in GitHub Secrets (see README)')
+        setNotifStatus('error: VITE_VAPID_PUBLIC_KEY not set — add it to GitHub Secrets and redeploy')
         return
       }
 
-      // 4. Wait for service worker — with a 10s timeout so it doesn't hang forever
+      // 4. Register (or retrieve) the push-only SW
       let reg
       try {
-        reg = await Promise.race([
-          navigator.serviceWorker.ready,
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(
-              'Service worker not ready. Make sure you have deployed the latest build (git push), then hard-refresh the page (Ctrl+Shift+R) and try again.'
-            )), 10000)
-          )
-        ])
+        reg = await getPushReg()
       } catch (swErr) {
         setNotifStatus(`error: ${swErr.message}`)
         return
       }
 
-      // 5. Get or create push subscription
+      // 5. Subscribe to push
       let pushSub = await reg.pushManager.getSubscription()
       if (!pushSub) {
         pushSub = await reg.pushManager.subscribe({
@@ -94,7 +118,7 @@ export default function Settings() {
         })
       }
 
-      // 6. Save to Supabase
+      // 6. Save subscription + time to Supabase
       const { data: { user } } = await supabase.auth.getUser()
       const { error } = await supabase.from('push_subscriptions').upsert({
         user_id: user.id,
@@ -114,9 +138,12 @@ export default function Settings() {
 
   async function disableNotifications() {
     try {
-      const reg = await navigator.serviceWorker.ready
-      const pushSub = await reg.pushManager.getSubscription()
-      if (pushSub) await pushSub.unsubscribe()
+      const regs = await navigator.serviceWorker.getRegistrations()
+      const pushReg = regs.find(r => r.scope.endsWith('/push/'))
+      if (pushReg) {
+        const pushSub = await pushReg.pushManager.getSubscription()
+        if (pushSub) await pushSub.unsubscribe()
+      }
       const { data: { user } } = await supabase.auth.getUser()
       await supabase.from('push_subscriptions').delete().eq('user_id', user.id)
     } catch (e) { console.error(e) }
@@ -142,7 +169,6 @@ export default function Settings() {
     if (data?.length) {
       setHabits(data)
     } else {
-      // Seed defaults if none exist
       const toInsert = DEFAULT_HABITS.map((name, i) => ({
         user_id: user.id, name, sort_order: i, is_deleted: false
       }))
@@ -185,10 +211,9 @@ export default function Settings() {
 
   async function saveOrder() {
     setSaving(true)
-    const updates = habits.map((h, i) =>
+    await Promise.all(habits.map((h, i) =>
       supabase.from('habits').update({ sort_order: i }).eq('id', h.id)
-    )
-    await Promise.all(updates)
+    ))
     setSaving(false)
     setMsg('Order saved!')
     setTimeout(() => setMsg(''), 2000)
@@ -257,7 +282,6 @@ export default function Settings() {
                   className="w-7 h-7 rounded-lg bg-teal-50 text-teal-500 text-xs flex items-center justify-center hover:bg-teal-100"
                   title="Rename"
                 >✏️</button>
-                {/* Mobile reorder arrows */}
                 <div className="flex gap-1 md:hidden">
                   <button
                     onClick={() => {
@@ -287,7 +311,6 @@ export default function Settings() {
           </AnimatePresence>
         </Reorder.Group>
 
-        {/* Add habit */}
         <div className="flex gap-2 mt-3">
           <input
             value={newHabit}
@@ -322,7 +345,7 @@ export default function Settings() {
         )}
         {notifPermission === 'denied' && (
           <p className="text-xs text-red-500 bg-red-50 rounded-xl px-3 py-2 mb-3">
-            Notifications are blocked in your browser. Open site settings for this page and change Notifications to "Allow", then try again.
+            Notifications are blocked. Open site settings for this page, set Notifications to "Allow", then try again.
           </p>
         )}
 
@@ -372,7 +395,7 @@ export default function Settings() {
         )}
 
         <p className="text-xs text-gray-400 mt-2">
-          Requires VAPID keys to be configured — see README. Works on desktop Chrome/Firefox/Edge and Android Chrome. iOS requires the app to be installed as a PWA.
+          Works on desktop Chrome/Firefox/Edge and Android Chrome. iOS requires adding to home screen first.
         </p>
       </section>
 

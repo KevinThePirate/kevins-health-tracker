@@ -2,16 +2,11 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
-// Set base to '/kevins-health-tracker/' if deploying to github.com/<user>/kevins-health-tracker
-// Change to '/' if using a custom domain or deploying to a root repo
 export default defineConfig({
   base: '/kevins-health-tracker/',
   plugins: [
     react(),
     VitePWA({
-      strategies: 'injectManifest',
-      srcDir: 'src',
-      filename: 'sw.js',
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg'],
       manifest: {
@@ -25,9 +20,6 @@ export default defineConfig({
         icons: [
           { src: 'favicon.svg', sizes: 'any', type: 'image/svg+xml' }
         ]
-      },
-      injectManifest: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,json}']
       }
     })
   ]
