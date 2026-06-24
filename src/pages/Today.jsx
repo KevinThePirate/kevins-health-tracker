@@ -1,7 +1,17 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useSearchParams } from 'react-router-dom'
 import { supabase } from '../supabase'
 import { parseFood, totalCalories } from '../utils/foodParser'
+
+function yesterday() {
+  const d = new Date()
+  d.setDate(d.getDate() - 1)
+  return d.toISOString().split('T')[0]
+}
+function todayStr() {
+  return new Date().toISOString().split('T')[0]
+}
 
 const DEFAULT_HABITS = [
   'Nox', 'No check social media', 'Shower', 'Vitamins', 'Walk',
@@ -27,6 +37,8 @@ const staggerItem = {
 }
 
 export default function Today() {
+  const [searchParams] = useSearchParams()
+  const [logDate, setLogDate] = useState(() => searchParams.get('date') || yesterday())
   const [habits, setHabits] = useState([])
   const [checked, setChecked] = useState([])
   const [mood, setMood] = useState(null)
@@ -42,15 +54,24 @@ export default function Today() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
-  const today = new Date().toISOString().split('T')[0]
   const pct = habits.length ? Math.round((checked.length / habits.length) * 100) : 0
+
+  function changeDate(delta) {
+    const d = new Date(logDate + 'T12:00:00')
+    d.setDate(d.getDate() + delta)
+    const next = d.toISOString().split('T')[0]
+    if (next <= todayStr()) setLogDate(next)
+  }
 
   useEffect(() => {
     loadData()
-  }, [])
+  }, [logDate])
 
   async function loadData() {
     setLoading(true)
+    // Reset form state when switching dates
+    setChecked([]); setMood(null); setUlcerClear(true); setUlcerCount(1)
+    setUlcerPain(null); setFoodRaw(''); setFoodParsed([]); setNotes(''); setLogId(null)
     try {
       const { data: { user } } = await supabase.auth.getUser()
 
@@ -67,12 +88,12 @@ export default function Today() {
         : DEFAULT_HABITS.map((name, i) => ({ id: `default-${i}`, name, sort_order: i }))
       setHabits(habitList)
 
-      // Load today's log
+      // Load log for the selected date
       const { data: log } = await supabase
         .from('daily_logs')
         .select('*')
         .eq('user_id', user.id)
-        .eq('log_date', today)
+        .eq('log_date', logDate)
         .single()
 
       if (log) {
@@ -86,18 +107,20 @@ export default function Today() {
         setFoodParsed(log.food_parsed || [])
         setNotes(log.notes || '')
       } else {
-        // Pre-populate ulcer from yesterday
-        const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0]
-        const { data: yest } = await supabase
+        // Pre-populate ulcer from the previous day
+        const prev = new Date(logDate + 'T12:00:00')
+        prev.setDate(prev.getDate() - 1)
+        const prevStr = prev.toISOString().split('T')[0]
+        const { data: prevLog } = await supabase
           .from('daily_logs')
           .select('ulcer_clear, ulcer_count, ulcer_pain')
           .eq('user_id', user.id)
-          .eq('log_date', yesterday)
+          .eq('log_date', prevStr)
           .single()
-        if (yest && !yest.ulcer_clear) {
+        if (prevLog && !prevLog.ulcer_clear) {
           setUlcerClear(false)
-          setUlcerCount(yest.ulcer_count ?? 1)
-          setUlcerPain(yest.ulcer_pain ?? null)
+          setUlcerCount(prevLog.ulcer_count ?? 1)
+          setUlcerPain(prevLog.ulcer_pain ?? null)
         }
       }
     } catch (e) {
@@ -123,7 +146,7 @@ export default function Today() {
 
     const payload = {
       user_id: user.id,
-      log_date: today,
+      log_date: logDate,
       mood,
       habit_ids: checked,
       food_raw: foodRaw,
@@ -164,12 +187,27 @@ export default function Today() {
 
   return (
     <div className="max-w-xl mx-auto px-4 py-6 space-y-6">
-      {/* Header */}
+      {/* Header with date navigation */}
       <motion.div variants={staggerItem} initial="initial" animate="animate">
-        <h1 className="text-2xl font-bold text-gray-900">Today</h1>
-        <p className="text-gray-400 text-sm mt-0.5">
-          {new Date().toLocaleDateString('en-IE', { weekday: 'long', day: 'numeric', month: 'long' })}
-        </p>
+        <h1 className="text-2xl font-bold text-gray-900 mb-3">
+          {logDate === todayStr() ? 'Today' : logDate === yesterday() ? 'Yesterday' : 'Log Entry'}
+        </h1>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => changeDate(-1)}
+            className="w-9 h-9 rounded-xl bg-white shadow-sm border border-gray-100 flex items-center justify-center text-gray-500 hover:bg-gray-50 font-bold"
+          >‹</button>
+          <div className="flex-1 text-center bg-white rounded-xl shadow-sm border border-gray-100 py-2 px-3">
+            <p className="text-sm font-semibold text-gray-700">
+              {new Date(logDate + 'T12:00:00').toLocaleDateString('en-IE', { weekday: 'long', day: 'numeric', month: 'long' })}
+            </p>
+          </div>
+          <button
+            onClick={() => changeDate(1)}
+            disabled={logDate >= todayStr()}
+            className="w-9 h-9 rounded-xl bg-white shadow-sm border border-gray-100 flex items-center justify-center text-gray-500 hover:bg-gray-50 font-bold disabled:opacity-30"
+          >›</button>
+        </div>
       </motion.div>
 
       {/* Habits */}

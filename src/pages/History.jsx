@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useNavigate } from 'react-router-dom'
 import { supabase } from '../supabase'
 
 const MOODS = { 5: '😄', 4: '😰', 3: '😐', 2: '😔', 1: '😞' }
@@ -12,6 +13,7 @@ function getFirstDayOfMonth(year, month) {
 }
 
 export default function History() {
+  const navigate = useNavigate()
   const now = new Date()
   const [year, setYear] = useState(now.getFullYear())
   const [month, setMonth] = useState(now.getMonth())
@@ -107,10 +109,11 @@ export default function History() {
             <motion.button
               key={day}
               whileTap={{ scale: 0.92 }}
-              onClick={() => log && setSelected(log)}
-              className={`aspect-square rounded-xl flex flex-col items-center justify-center gap-0.5 transition-colors ${
-                log ? 'hover:bg-gray-50 cursor-pointer' : 'cursor-default'
-              } ${isToday ? 'ring-2 ring-teal-400' : ''}`}
+              onClick={() => {
+                if (log) setSelected(log)
+                else navigate(`/today?date=${dateStr}`)
+              }}
+              className={`aspect-square rounded-xl flex flex-col items-center justify-center gap-0.5 transition-colors hover:bg-gray-50 cursor-pointer ${isToday ? 'ring-2 ring-teal-400' : ''}`}
             >
               <span className={`text-sm font-medium ${isToday ? 'text-teal-600' : 'text-gray-700'}`}>{day}</span>
               {color && <div className={`w-2 h-2 rounded-full ${color}`} />}
@@ -145,7 +148,13 @@ export default function History() {
                     {new Date(selected.log_date + 'T12:00:00').toLocaleDateString('en-IE', { weekday: 'long', day: 'numeric', month: 'long' })}
                   </h3>
                 </div>
-                <button onClick={() => setSelected(null)} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => navigate(`/today?date=${selected.log_date}`)}
+                    className="px-3 py-1.5 bg-teal-50 text-teal-700 text-sm font-semibold rounded-xl hover:bg-teal-100 transition-colors"
+                  >✏️ Edit</button>
+                  <button onClick={() => setSelected(null)} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+                </div>
               </div>
 
               <div className="space-y-4">

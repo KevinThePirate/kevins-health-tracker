@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
 import { supabase } from '../supabase'
 
@@ -12,6 +12,8 @@ const DEFAULT_HABITS = [
 export default function Settings() {
   const [habits, setHabits] = useState([])
   const [newHabit, setNewHabit] = useState('')
+  const [editingId, setEditingId] = useState(null)
+  const [editingName, setEditingName] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState('')
@@ -55,6 +57,19 @@ export default function Settings() {
   async function deleteHabit(id) {
     await supabase.from('habits').update({ is_deleted: true }).eq('id', id)
     setHabits(prev => prev.filter(h => h.id !== id))
+  }
+
+  function startEdit(habit) {
+    setEditingId(habit.id)
+    setEditingName(habit.name)
+  }
+
+  async function commitEdit(id) {
+    const name = editingName.trim()
+    if (!name) { setEditingId(null); return }
+    await supabase.from('habits').update({ name }).eq('id', id)
+    setHabits(prev => prev.map(h => h.id === id ? { ...h, name } : h))
+    setEditingId(null)
   }
 
   async function saveOrder() {
@@ -110,7 +125,27 @@ export default function Settings() {
                 className="flex items-center gap-2 bg-gray-50 rounded-xl px-3 py-2.5 cursor-grab active:cursor-grabbing"
               >
                 <span className="text-gray-300 text-sm select-none">⠿</span>
-                <span className="flex-1 text-sm font-medium text-gray-700">{habit.name}</span>
+                {editingId === habit.id ? (
+                  <input
+                    autoFocus
+                    value={editingName}
+                    onChange={e => setEditingName(e.target.value)}
+                    onBlur={() => commitEdit(habit.id)}
+                    onKeyDown={e => { if (e.key === 'Enter') commitEdit(habit.id); if (e.key === 'Escape') setEditingId(null) }}
+                    className="flex-1 px-2 py-1 rounded-lg border border-teal-400 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-teal-400 bg-white"
+                  />
+                ) : (
+                  <span
+                    className="flex-1 text-sm font-medium text-gray-700 cursor-text"
+                    onDoubleClick={() => startEdit(habit)}
+                    title="Double-click to rename"
+                  >{habit.name}</span>
+                )}
+                <button
+                  onClick={() => startEdit(habit)}
+                  className="w-7 h-7 rounded-lg bg-teal-50 text-teal-500 text-xs flex items-center justify-center hover:bg-teal-100"
+                  title="Rename"
+                >✏️</button>
                 {/* Mobile reorder arrows */}
                 <div className="flex gap-1 md:hidden">
                   <button
