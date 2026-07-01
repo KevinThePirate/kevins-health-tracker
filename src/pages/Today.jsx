@@ -34,6 +34,75 @@ const staggerItem = {
   animate: { opacity: 1, y: 0, transition: { type: 'spring', stiffness: 300, damping: 24 } }
 }
 
+// Kevin's calorie targets — 5'11", 78kg, goal 70kg, lightly active
+// Maintenance ~2400 kcal/day (Mifflin-St Jeor × 1.375 activity factor)
+// Weight-loss goal ~2000 kcal/day (≈400 kcal deficit → ~0.5 kg/week)
+const CAL_GOAL  = 2000
+const CAL_MAINT = 2400
+const CAL_MAX   = 3200  // bar full-width ceiling
+
+function CalorieBar({ calories }) {
+  if (!calories) return null
+  const fillPct  = Math.min((calories / CAL_MAX) * 100, 100)
+  const goalPct  = (CAL_GOAL  / CAL_MAX) * 100   // 62.5 %
+  const maintPct = (CAL_MAINT / CAL_MAX) * 100   // 75 %
+  const color    = calories > CAL_MAINT ? 'bg-red-500'
+                 : calories > CAL_GOAL  ? 'bg-amber-400'
+                 : 'bg-teal-500'
+  const hitGoal  = calories >= CAL_GOAL
+  const hitMaint = calories >= CAL_MAINT
+
+  return (
+    <div className="mt-4 pt-3 border-t border-gray-100">
+      {/* Track */}
+      <div className="relative h-3 rounded-full overflow-hidden bg-gray-100">
+        {/* Zone tints */}
+        <div className="absolute inset-y-0 bg-amber-50"
+          style={{ left: `${goalPct}%`, width: `${maintPct - goalPct}%` }} />
+        <div className="absolute inset-y-0 right-0 bg-red-50"
+          style={{ left: `${maintPct}%` }} />
+        {/* Animated fill */}
+        <motion.div
+          className={`absolute inset-y-0 left-0 rounded-full ${color}`}
+          initial={{ width: 0 }}
+          animate={{ width: `${fillPct}%` }}
+          transition={{ duration: 0.6, ease: 'easeOut' }}
+        />
+        {/* Marker lines */}
+        <div className="absolute inset-y-0 w-px z-10"
+          style={{ left: `${goalPct}%`, background: 'rgba(13,148,136,0.7)' }} />
+        <div className="absolute inset-y-0 w-px z-10"
+          style={{ left: `${maintPct}%`, background: 'rgba(234,88,12,0.7)' }} />
+      </div>
+
+      {/* Tick labels */}
+      <div className="relative mt-1 h-4">
+        <span
+          className={`absolute text-[10px] font-semibold -translate-x-1/2 whitespace-nowrap ${hitGoal ? 'text-teal-600' : 'text-gray-400'}`}
+          style={{ left: `${goalPct}%` }}
+        >
+          {hitGoal ? '✓' : '◦'} {CAL_GOAL} goal
+        </span>
+        <span
+          className={`absolute text-[10px] font-semibold -translate-x-1/2 whitespace-nowrap ${hitMaint ? 'text-orange-500' : 'text-gray-400'}`}
+          style={{ left: `${maintPct}%` }}
+        >
+          {hitMaint ? '✓' : '◦'} {CAL_MAINT} maint.
+        </span>
+      </div>
+
+      {/* Status line */}
+      <p className="text-[10px] text-gray-400 mt-0.5">
+        {calories < CAL_GOAL
+          ? `${CAL_GOAL - calories} kcal under weight-loss goal`
+          : calories < CAL_MAINT
+          ? `In the zone — ${CAL_MAINT - calories} kcal below maintenance`
+          : `${calories - CAL_MAINT} kcal over maintenance`}
+      </p>
+    </div>
+  )
+}
+
 export default function Today() {
   const [searchParams] = useSearchParams()
   const [logDate, setLogDate] = useState(() => searchParams.get('date') || yesterday())
@@ -410,6 +479,7 @@ export default function Today() {
               <span className="text-gray-800">Total</span>
               <span className="text-teal-600">{totalCalories(foodParsed)} kcal</span>
             </div>
+            <CalorieBar calories={totalCalories(foodParsed)} />
           </motion.div>
         )}
       </motion.section>
