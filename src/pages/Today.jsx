@@ -179,7 +179,8 @@ export default function Today() {
         setUlcerCount(log.ulcer_count ?? 1)
         setUlcerPain(log.ulcer_pain ?? null)
         setFoodRaw(log.food_raw || '')
-        setFoodParsed(log.food_parsed || [])
+        // Always re-parse from raw so new food lookup entries apply immediately
+        setFoodParsed(parseFood(log.food_raw || ''))
         setNotes(log.notes || '')
       } else {
         // Pre-populate ulcer from previous day
